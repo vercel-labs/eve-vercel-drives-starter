@@ -7,12 +7,9 @@
  */
 import type {
   SlackAuthor,
-  SlackHandle,
   SlackInboundMessageContext,
   SlackMessage,
-  SlackThread,
 } from "eve/channels/slack";
-import { vi } from "vitest";
 
 const unsupported = (name: string) => (): never => {
   throw new Error(`This test does not provide ${name}.`);
@@ -39,7 +36,7 @@ export const slackAuthor = (
  * Builds a complete inbound Slack message matching eve's public webhook contract.
  *
  * @param overrides - Message properties to replace for the scenario under test.
- * @returns A human-authored message with stable channel, workspace, and thread identifiers.
+ * @returns A human-authored thread reply with stable channel, workspace, and thread identifiers.
  */
 export const slackMessage = (
   overrides: Partial<SlackMessage> = {}
@@ -59,75 +56,51 @@ export const slackMessage = (
   };
 };
 
-/**
- * Builds a Slack thread handle with observable delivery and subscription operations.
- *
- * @param overrides - Explicit thread methods or properties required by the scenario.
- * @returns A thread fixture whose supported delivery methods return stable receipts and whose DMs fail unless supplied.
- */
-export const slackThread = (
-  overrides: Partial<SlackThread> = {}
-): SlackThread => ({
-  listParticipants: vi
-    .fn<SlackThread["listParticipants"]>()
-    .mockResolvedValue([]),
-  mentionUser: (userId) => `<@${userId}>`,
-  post: vi
-    .fn<SlackThread["post"]>()
-    .mockResolvedValue({ id: "posted-ts", raw: { ok: true } }),
-  postDirectMessage: vi.fn<SlackThread["postDirectMessage"]>(
-    unsupported("DMs")
-  ),
-  postEphemeral: vi
-    .fn<SlackThread["postEphemeral"]>()
-    .mockResolvedValue({ id: "ephemeral-ts", raw: { ok: true } }),
-  recentMessages: [],
-  refresh: vi.fn<SlackThread["refresh"]>().mockResolvedValue(),
-  startTyping: vi.fn<SlackThread["startTyping"]>().mockResolvedValue(),
-  ...overrides,
-});
-
-/* The `ctx.slack` handle; `request` defaults to an `{ ok: true }` spy. */
-const slackHandle = (overrides: Partial<SlackHandle> = {}): SlackHandle => ({
-  channelId: "C123",
-  request: vi.fn<SlackHandle["request"]>().mockResolvedValue({ ok: true }),
-  teamId: "T123",
-  threadTs: "100.1",
-  uploadFiles: unsupported("file uploads"),
-  ...overrides,
-});
-
 interface InboundContextOptions {
-  slack?: Partial<SlackHandle>;
-  thread?: Partial<SlackThread>;
+  edit?: SlackInboundMessageContext["edit"];
+  mentioned?: boolean;
+  subscribed?: boolean;
 }
 
 /**
  * Builds the context supplied to Slack inbound message hooks.
  *
- * @param options - Optional Slack API or thread overrides.
- * @returns Routing context whose session mutation methods fail when unexpectedly called.
+ * @param options - Whether the message mentions the agent, whether its thread has a session, and the edit being decided.
+ * @returns Routing context whose Slack API, thread, and session methods fail when unexpectedly called.
  */
 export const inboundContext = ({
-  slack,
-  thread,
+  edit,
+  mentioned = false,
+  subscribed = false,
 }: InboundContextOptions = {}): SlackInboundMessageContext => ({
   cancel: unsupported("session cancellation"),
   clear: unsupported("session clearing"),
   compact: unsupported("session compaction"),
-  isBotMentioned: vi
-    .fn<SlackInboundMessageContext["isBotMentioned"]>()
-    .mockReturnValue(false),
-  isDMOrPrivateChannel: vi
-    .fn<SlackInboundMessageContext["isDMOrPrivateChannel"]>()
-    .mockResolvedValue(false),
-  isSubscribed: vi
-    .fn<SlackInboundMessageContext["isSubscribed"]>()
-    .mockResolvedValue(false),
-  reset: unsupported("session reset"),
+  edit,
+  end: unsupported("ending the session"),
+  isBotMentioned: () => mentioned,
+  isDMOrPrivateChannel: unsupported("conversation type checks"),
+  isSubscribed: async () => await Promise.resolve(subscribed),
+  openCodeChannel: unsupported("code channels"),
   resolveSession: unsupported("session resolution"),
   respond: unsupported("input responses"),
   send: unsupported("session sends"),
-  slack: slackHandle(slack),
-  thread: slackThread(thread),
+  slack: {
+    channelId: "C123",
+    codeChannel: false,
+    request: unsupported("Slack API calls"),
+    teamId: "T123",
+    threadTs: "100.1",
+    uploadFiles: unsupported("file uploads"),
+  },
+  thread: {
+    listParticipants: unsupported("participant lists"),
+    mentionUser: (userId) => `<@${userId}>`,
+    post: unsupported("thread posts"),
+    postDirectMessage: unsupported("DMs"),
+    postEphemeral: unsupported("ephemeral posts"),
+    recentMessages: [],
+    refresh: unsupported("thread refresh"),
+    startTyping: unsupported("typing status"),
+  },
 });

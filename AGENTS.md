@@ -12,10 +12,10 @@ These instructions are for agents maintaining the repository. The assistant's be
 | Model and session limits | `agent/agent.ts` |
 | Drive name, region, mount path, path validation, and writes | `agent/lib/drive.ts` |
 | Session sandbox and the Drive snapshot mount | `agent/sandbox.ts` |
-| Save tool and built-in tool overrides | `agent/tools/` |
+| Save tool, `no_reply`, and built-in tool overrides | `agent/tools/` |
 | Upload command | `scripts/upload-to-drive.ts` and `scripts/lib/upload.ts` |
 | Sample files for the first upload | `content/` |
-| Slack channel, sender auth, and profile lookups | `agent/channels/slack.ts` and `agent/lib/integrations/slack/` |
+| Slack channel, sender auth, thread replies, and sender names | `agent/channels/slack.ts` |
 | HTTP channel and caller auth | `agent/channels/eve.ts` |
 | Shared test fixtures | `agent/lib/testing/` |
 | Setup and customization guidance | `README.md`, `CUSTOMIZATION.md`, and `.env.example` |
@@ -41,7 +41,7 @@ Prefer native integrations. When installation is part of the task, use `pnpm exe
 
 ## Implementation conventions
 
-Keep files in `agent/tools/` small, with reusable behavior in `agent/lib/`. `save_to_drive.ts` is the only authored tool; the other tool files disable eve built-ins. Disabling `write_file` steers the model toward `save_to_drive`. `web_fetch` and `web_search` are removed because they run in the app outside the sandbox's network policy and would give instructions planted in Drive files a way to send file contents out. `bash` and `read_file` stay enabled for reading `/drive`. The filename exemption for `agent/tools/*.ts` in `oxlint.config.ts` exists because eve names tools after their files.
+Keep files in `agent/tools/` small, with reusable behavior in `agent/lib/`. `save_to_drive.ts` is the only authored tool. `no_reply.ts` adds eve's built-in `no_reply` tool, which lets the agent stay quiet in a Slack thread, and the other tool files disable eve built-ins. Disabling `write_file` steers the model toward `save_to_drive`. `web_fetch` and `web_search` are removed because they run in the app outside the sandbox's network policy and would give instructions planted in Drive files a way to send file contents out. `bash` and `read_file` stay enabled for reading `/drive`. The filename exemption for `agent/tools/*.ts` in `oxlint.config.ts` exists because eve names tools after their files.
 
 Keep `scripts/upload-to-drive.ts` limited to argument parsing and output, with upload logic in `scripts/lib/upload.ts` so tests can call it directly. Modules under `scripts/` and the modules they import from `agent/lib/` run under plain Node type stripping, so they import local files with explicit `.ts` extensions.
 
@@ -62,7 +62,7 @@ Use `.env.example` to document new configuration without credentials. When confi
 
 ## Local and hosted behavior
 
-`pnpm dev` opens eve's terminal chat. Local sessions use the same Vercel Sandbox and Drive as the deployment, so they need the Vercel OIDC token from `vercel env pull .env.local`. The token expires after 12 hours, so pull it again when the SDK reports an OIDC credentials error. Local sessions don't look up Slack profiles.
+`pnpm dev` opens eve's terminal chat. Local sessions use the same Vercel Sandbox and Drive as the deployment, so they need the Vercel OIDC token from `vercel env pull .env.local`. The token expires after 12 hours, so pull it again when the SDK reports an OIDC credentials error. Local sessions don't look up Slack sender names.
 
 The Slack channel requires `SLACK_CONNECTOR`, so `pnpm exec eve info` and `pnpm build` fail when it is unset. Pull the project's variables with `vercel env pull .env.local`, or set a placeholder value such as `slack/placeholder` when only checking compilation. `pnpm build` also prepares a Vercel Sandbox snapshot, which needs a linked project and credentials.
 
