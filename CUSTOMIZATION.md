@@ -11,7 +11,7 @@ Choose the task you want to complete:
 - [Add a delete tool](#add-a-delete-tool)
 - [Sync files on a schedule](#sync-files-on-a-schedule)
 - [Mount a second Drive](#mount-a-second-drive)
-- [Control Slack identity lookups](#control-slack-identity-lookups)
+- [Change how the agent works in Slack](#change-how-the-agent-works-in-slack)
 - [Remove Slack](#remove-slack)
 - [Test and deploy your changes](#test-and-deploy-your-changes)
 - [Set up an existing project](#set-up-an-existing-project)
@@ -41,7 +41,6 @@ After changing variables on Vercel, run `vercel env pull .env.local` to download
 | `DRIVE_NAME` | `eve-drive` | The Drive that sessions mount and that `save_to_drive` and `pnpm drive:upload` write to |
 | `DRIVE_REGION` | `iad1` | The region of the Drive and of every sandbox that mounts it |
 | `SLACK_CONNECTOR` | Set by the template setup | The Vercel Connect connector for Slack, such as `slack/drive-agent` |
-| `SLACK_IDENTITY_EXCLUDED_USER_IDS` | Empty | Slack user IDs to skip in [identity lookups](#control-slack-identity-lookups) |
 
 The upload script and `save_to_drive` create the Drive named by `DRIVE_NAME` in `DRIVE_REGION` the first time they write to it. Sessions can mount the Drive only after something has been written to it, so a new Drive leaves `/drive` missing until your first upload or save. Changing `DRIVE_NAME` points the agent at a different Drive, and files on the previous Drive stay there. A Drive's region can't change after it's created, and a sandbox can mount a Drive only in its own region. To move to another region, set `DRIVE_REGION` together with a new `DRIVE_NAME` and upload your files again.
 
@@ -63,7 +62,7 @@ Keep the existing sections on reading and saving files alongside your own guidan
 
 Change `model` in [agent/agent.ts](agent/agent.ts) to use another [AI Gateway model](https://vercel.com/ai-gateway/models). The template uses `openai/gpt-6.1-sol-fast` and authenticates with Vercel OIDC. For other hosting environments, see [AI Gateway authentication](https://vercel.com/docs/ai-gateway/authentication-and-byok).
 
-The same file limits each session to `300_000` input tokens through `maxInputTokensPerSession`. Each model call counts the input it sends, including earlier messages and the file contents the agent has read, so reading many large files reaches the limit sooner. When a session crosses the limit, eve pauses it and asks whether to continue. Increase the limit if sessions pause too often. See [eve's agent configuration](https://eve.dev/docs/agent-config) for output and cost limits.
+The same file limits each session to `300_000` input tokens through `limits.sessionUsage`, a function that receives the session's token usage and returns `true` when the session should stop. Each model call counts the input it sends, including earlier messages and the file contents the agent has read, so reading many large files reaches the limit sooner. When a session crosses the limit, eve pauses it and asks whether to continue, and choosing to continue starts a new `300_000`-token window. Increase the limit if sessions pause too often. See [eve's agent configuration](https://eve.dev/docs/agent-config#runtime-limits) for output and cost limits.
 
 ## Add your own files
 
@@ -103,7 +102,7 @@ export default defineTool({
 });
 ```
 
-`once()` asks for approval the first time the tool runs in a session and allows later calls in that session automatically. Use `always()` to require approval for every save. eve's channels, including Slack, render the approval prompt for you. In Slack, anyone in the thread can answer the prompt, including the person who asked, so approval confirms intent rather than restricting who can save. To limit who can approve, add an `onInputResponse` check to the Slack channel, as described in [eve's Slack guide](https://eve.dev/docs/channels/slack). See [eve's human-in-the-loop guide](https://eve.dev/docs/human-in-the-loop) for the other policies, including `auto()`, which asks a decision model whether a call needs a person.
+`once()` asks for approval the first time the tool runs in a session and allows later calls in that session automatically. Use `always()` to require approval for every save. eve's channels, including Slack, render the approval prompt for you. In Slack, only the person whose message led to the save can answer the prompt, so approval confirms that person's intent. To let other people approve, such as a list of designated approvers, define a `response` policy on the tool, and to limit who can click Slack's approval buttons, add an `onAnswers` check to the Slack channel, as described in [eve's Slack guide](https://eve.dev/docs/channels/slack#restrict-access). See [eve's human-in-the-loop guide](https://eve.dev/docs/human-in-the-loop) for the other policies, including `auto()`, which asks a decision model whether a call needs a person.
 
 ## Add a delete tool
 
@@ -267,33 +266,30 @@ export default defineSandbox(async () => {
 
 Both Drives must be in `DRIVE_REGION`, and a Drive's region can't change after it's created. If either Drive is missing or has never been written to, the agent logs `drive.unavailable` and opens a sandbox with neither mount, so check the logs if `/drive` goes missing after this change. Tell the agent about `/reference` in [agent/instructions.md](agent/instructions.md), including that it can't save there.
 
-## Control Slack identity lookups
+## Change how the agent works in Slack
 
-Before responding to a Slack mention or direct message, the agent looks up the Slack profiles of the sender, anyone mentioned, and the people who posted in the thread since its last reply, then adds their names and profile images to the conversation as context. This uses the `users:read` permission. The agent never adds email addresses, so it can't reveal them to other people in a channel.
+The Slack channel is defined in [agent/channels/slack.ts](agent/channels/slack.ts), and its tests are in [slack.test.ts](agent/channels/slack.test.ts). The agent answers when someone @mentions it in a channel it has joined or sends it a direct message, and replies in a thread. Each thread is one session, so once the agent is part of a thread it also sees later replies that don't mention it. eve marks those replies with guidance to answer only when the reply is meant for the agent, and the agent stays quiet by calling the `no_reply` tool, so people can keep talking to each other in the thread. Top-level messages still need a mention, and messages from bots and other apps never start a turn. To require a mention for every reply instead, remove the branch in `routeSlackMessage` that returns `status: "deferred"`.
 
-To skip profile lookups for selected bot or service accounts, set:
+Slack sends replies that don't mention the agent only when the app subscribes to the `message.channels` event with the `channels:history` scope, plus `message.groups` and `groups:history` for private channels. If the agent ignores such replies, add them in the connector's **Advanced** settings in Vercel Connect, as described in [eve's guide to replying without a mention](https://eve.dev/docs/channels/slack#reply-without-a-mention).
 
-```dotenv
-SLACK_IDENTITY_EXCLUDED_USER_IDS=U0123456789,U0987654321
-```
+Before a message reaches the agent, eve looks up the sender's Slack display name and real name and adds them to the message, including the earlier thread replies the agent loads. The names also appear on `message.author` in the channel's hooks and as the `full_name` attribute of the sender's auth. This uses the `users:read` permission, so add it to the connector's bot scopes and reinstall the Slack app if names don't appear. Lookups are cached for an hour, and a lookup that fails or takes longer than two seconds is skipped without holding up the message. The agent sees people who are only mentioned in a message, and anyone whose lookup failed, as Slack user IDs such as `<@U0123456789>`, and it doesn't receive profile images.
 
-Excluded users can still interact with the agent; this setting only skips their profile lookups. The lookup code and its tests are in [identity.ts](agent/lib/integrations/slack/identity.ts) and [identity.test.ts](agent/lib/integrations/slack/identity.test.ts).
+The agent never receives email addresses, so it can't reveal them to other people in a channel. To give it the sender's email, change `messageContext` in `agent/channels/slack.ts` to `{ users: { email: true } }` and add the `users:read.email` permission. Names and emails then reach the model, session history, and traces. See [eve's Slack reference](https://eve.dev/docs/channels/slack/reference#add-sender-names-and-emails) for custom caching.
 
 ## Remove Slack
 
 To use the agent only through eve's HTTP channel, which `pnpm dev` uses, delete the Slack files:
 
 ```sh
-rm agent/channels/slack.ts agent/lib/testing/slack.ts agent/lib/utils/env.ts agent/lib/values.ts
-rm -r agent/lib/integrations
+rm agent/channels/slack.ts agent/channels/slack.test.ts agent/lib/testing/slack.ts agent/lib/utils/env.ts
 pnpm remove @vercel/connect
 ```
 
-`env.ts` and `values.ts` are used only by the Slack integration. Then update the remaining Slack references:
+`env.ts` is used only by the Slack channel. Then update the remaining Slack references:
 
-- In [agent/instructions.md](agent/instructions.md), the identity and the examples that mention Slack threads.
+- In [agent/instructions.md](agent/instructions.md), the identity, the examples that mention Slack threads, and the Slack section.
 - In [README.md](README.md), the `connect` parameter in the Deploy button URL, the Slack row in the tech stack table, and the Slack row in the customization table.
-- In your Vercel project, the `SLACK_CONNECTOR` and `SLACK_IDENTITY_EXCLUDED_USER_IDS` variables.
+- In your Vercel project, the `SLACK_CONNECTOR` variable.
 
 Run `pnpm validate` afterward; `knip` reports any file or dependency that's no longer used.
 

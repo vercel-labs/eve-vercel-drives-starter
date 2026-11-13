@@ -84,7 +84,7 @@ vercel deploy --prod
 | Which Drive the agent uses | `DRIVE_NAME` and `DRIVE_REGION`, see [environment variables](CUSTOMIZATION.md#change-environment-variables) |
 | Approval before saving | [Require approval before saving](CUSTOMIZATION.md#require-approval-before-saving) |
 | New write tools and scheduled syncs | [Add a delete tool](CUSTOMIZATION.md#add-a-delete-tool) and [Sync files on a schedule](CUSTOMIZATION.md#sync-files-on-a-schedule) |
-| Slack profile lookups | `SLACK_IDENTITY_EXCLUDED_USER_IDS`, see [Slack identity lookups](CUSTOMIZATION.md#control-slack-identity-lookups) |
+| Slack replies and sender names | [agent/channels/slack.ts](agent/channels/slack.ts), see [Change how the agent works in Slack](CUSTOMIZATION.md#change-how-the-agent-works-in-slack) |
 | Model and session limits | [agent/agent.ts](agent/agent.ts) |
 
 For more information on customizing the agent, see [CUSTOMIZATION.md](CUSTOMIZATION.md).
