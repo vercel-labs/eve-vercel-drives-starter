@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { DriveBusyError } from "../../agent/lib/drive.ts";
+import { fakeDriveService } from "../../agent/lib/testing/drive-service.ts";
 import {
   driveFixture,
   sandboxFixture,
@@ -167,6 +168,100 @@ describe("drive upload", () => {
         DriveBusyError
       );
       expect(sdk.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("uploads to an in-memory Drive", () => {
+    let drive: ReturnType<typeof fakeDriveService>;
+
+    beforeEach(() => {
+      drive = fakeDriveService();
+    });
+
+    it("copies a folder tree byte for byte in one write session", async () => {
+      const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+      await put("welcome.md", "héllo");
+      await put("handbook/onboarding.md", "# Onboarding");
+      await put("handbook/assets/logo.png", bytes);
+      await put(".env", "SECRET=1");
+
+      await expect(uploadFolder({ folder })).resolves.toStrictEqual({
+        paths: [
+          "/drive/handbook/assets/logo.png",
+          "/drive/handbook/onboarding.md",
+          "/drive/welcome.md",
+        ],
+        skipped: 0,
+      });
+
+      await expect(drive.paths()).resolves.toStrictEqual([
+        "/drive/handbook/assets/logo.png",
+        "/drive/handbook/onboarding.md",
+        "/drive/welcome.md",
+      ]);
+      await expect(
+        drive.read("/drive/handbook/assets/logo.png")
+      ).resolves.toStrictEqual(bytes);
+      await expect(drive.read("/drive/welcome.md")).resolves.toStrictEqual(
+        new TextEncoder().encode("héllo")
+      );
+    });
+
+    it("uses one write session and frees the Drive afterward", async () => {
+      await put("a.md");
+      await put("sub/b.md");
+
+      await uploadFolder({ folder });
+
+      expect(drive.create).toHaveBeenCalledOnce();
+      expect(drive.holder()).toBeUndefined();
+    });
+
+    it("uploads more than one batch of files", async () => {
+      const names = Array.from(
+        { length: WRITE_BATCH * 2 + 3 },
+        (_, index) => `f${String(index).padStart(3, "0")}.md`
+      );
+      await Promise.all(
+        names.map(async (name) => {
+          await put(name, name);
+        })
+      );
+
+      await uploadFolder({ folder, prefix: "bulk" });
+
+      await expect(drive.paths()).resolves.toStrictEqual(
+        names.map((name) => `/drive/bulk/${name}`)
+      );
+      expect(drive.create).toHaveBeenCalledOnce();
+    });
+
+    it("overwrites files at the same paths and leaves the rest of the Drive alone", async () => {
+      await put("a.md", "old");
+      await put("keep.md", "keep");
+      await uploadFolder({ folder, prefix: "docs" });
+      await rm(path.join(folder, "keep.md"));
+      await put("a.md", "new");
+
+      await uploadFolder({ folder, prefix: "docs/" });
+
+      await expect(drive.paths()).resolves.toStrictEqual([
+        "/drive/docs/a.md",
+        "/drive/docs/keep.md",
+      ]);
+      await expect(drive.read("/drive/docs/a.md")).resolves.toStrictEqual(
+        new TextEncoder().encode("new")
+      );
+    });
+
+    it("uploads nothing while another sandbox holds the Drive", async () => {
+      await put("a.md");
+      drive.hold("sess_save");
+
+      await expect(uploadFolder({ folder })).rejects.toStrictEqual(
+        new DriveBusyError("sess_save")
+      );
+      await expect(drive.paths()).resolves.toStrictEqual([]);
     });
   });
 

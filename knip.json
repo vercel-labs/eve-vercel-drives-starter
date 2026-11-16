@@ -1,0 +1,3 @@
+{
+  "entry": ["agent/lib/testing/offline-cli.ts"]
+}

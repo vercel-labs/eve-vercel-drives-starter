@@ -33,9 +33,10 @@ export const driveFixture = (currentSessionId?: string) =>
  *
  * @param exitCode - Process exit code.
  * @param stderr - Captured standard error.
+ * @param stdout - Captured standard output.
  * @returns A finished command.
  */
-export const commandFinished = (exitCode = 0, stderr = "") =>
+export const commandFinished = (exitCode = 0, stderr = "", stdout = "") =>
   new CommandFinished({
     cmd: {
       args: [],
@@ -47,9 +48,27 @@ export const commandFinished = (exitCode = 0, stderr = "") =>
       startedAt: 0,
     },
     exitCode,
-    output: { stderr, stdout: "" },
+    output: { stderr, stdout },
     sessionId: "sess_write",
   });
+
+/**
+ * Builds the session snapshot the SDK returns when a sandbox stops.
+ *
+ * @returns A stopped write session in `iad1`.
+ */
+export const stoppedSession = () => ({
+  createdAt: 0,
+  cwd: "/",
+  id: "sess_write",
+  memory: 2048,
+  region: "iad1",
+  requestedAt: 0,
+  status: "stopped" as const,
+  timeout: 300_000,
+  updatedAt: 0,
+  vcpus: 1,
+});
 
 /**
  * Builds a real SDK sandbox whose API-backed methods used by the Drive code are spies.
@@ -79,18 +98,7 @@ export const sandboxFixture = () => {
       .spyOn(sandbox, "runCommand")
       .mockResolvedValue(commandFinished()),
     sandbox,
-    stop: vi.spyOn(sandbox, "stop").mockResolvedValue({
-      createdAt: 0,
-      cwd: "/",
-      id: "sess_write",
-      memory: 2048,
-      region: "iad1",
-      requestedAt: 0,
-      status: "stopped",
-      timeout: 300_000,
-      updatedAt: 0,
-      vcpus: 1,
-    }),
+    stop: vi.spyOn(sandbox, "stop").mockResolvedValue(stoppedSession()),
     writeFiles: vi.spyOn(sandbox, "writeFiles").mockResolvedValue(),
   };
 };

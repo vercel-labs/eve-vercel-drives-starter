@@ -37,11 +37,11 @@ pnpm exec eve registry search <query> --json
 pnpm exec eve registry view <item>
 ```
 
-Prefer native integrations. When installation is part of the task, use `pnpm exec eve add <item> --non-interactive`. Exit code 2 means setup needs an answer or prerequisite; inspect the final NDJSON event and follow its continuation instructions. Never pass secrets through `--answer`.
+Prefer native integrations. When installation is part of the task, use `pnpm exec eve add <item> --non-interactive --yes`. Exit code 2 means setup needs an answer or prerequisite; inspect the final NDJSON event and follow its continuation instructions. Never pass secrets through `--answer`.
 
 ## Implementation conventions
 
-Keep files in `agent/tools/` small, with reusable behavior in `agent/lib/`. `save_to_drive.ts` is the only authored tool; the other tool files disable eve built-ins. Disabling `write_file` steers the model toward `save_to_drive`. `web_fetch` and `web_search` are removed because they run in the app outside the sandbox's network policy and would give instructions planted in Drive files a way to send file contents out. `bash` and `read_file` stay enabled for reading `/drive`. The filename exemption for `agent/tools/*.ts` in `oxlint.config.ts` exists because eve names tools after their files.
+Keep files in `agent/tools/` small, with reusable behavior in `agent/lib/`. `save_to_drive.ts` is the only authored tool; the other tool files disable eve built-ins. Disabling `write_file` and `edit_file` steers the model toward `save_to_drive`. `web_fetch` and `web_search` are removed because they run in the app outside the sandbox's network policy and would give instructions planted in Drive files a way to send file contents out. `bash` and `read_file` stay enabled for reading `/drive`, and eve's `agent` tool stays enabled for delegating to a copy of the agent with the same tools. An eve upgrade can add a default tool, so `agent/agent.test.ts` compiles the agent and fails when `eve info` reports a tool it doesn't list. Decide whether to disable a new default before adding it there. `eve info` leaves out the `eve__task_wait` and `eve__task_cancel` controls that come with `agent`. The filename exemption for `agent/tools/*.ts` in `oxlint.config.ts` exists because eve names tools after their files.
 
 Keep `scripts/upload-to-drive.ts` limited to argument parsing and output, with upload logic in `scripts/lib/upload.ts` so tests can call it directly. Modules under `scripts/` and the modules they import from `agent/lib/` run under plain Node type stripping, so they import local files with explicit `.ts` extensions.
 
@@ -64,7 +64,7 @@ Use `.env.example` to document new configuration without credentials. When confi
 
 `pnpm dev` opens eve's terminal chat. Local sessions use the same Vercel Sandbox and Drive as the deployment, so they need the Vercel OIDC token from `vercel env pull .env.local`. The token expires after 12 hours, so pull it again when the SDK reports an OIDC credentials error. Local sessions don't look up Slack profiles.
 
-The Slack channel requires `SLACK_CONNECTOR`, so `pnpm exec eve info` and `pnpm build` fail when it is unset. Pull the project's variables with `vercel env pull .env.local`, or set a placeholder value such as `slack/placeholder` when only checking compilation. `pnpm build` also prepares a Vercel Sandbox snapshot, which needs a linked project and credentials.
+The Slack channel requires `SLACK_CONNECTOR`, so `pnpm exec eve info` and `pnpm build` fail when it is unset. Pull the project's variables with `vercel env pull .env.local`, or set a placeholder value such as `slack/placeholder` when only checking compilation. Both commands look up the model's context window in AI Gateway's model catalog, so their first run needs network access, and neither needs Vercel credentials. `pnpm build` also writes `.output/vercel-connect-manifest.json`, which describes the Slack connector the channel uses.
 
 Use the Vercel CLI for project configuration and deployment instructions, including `vercel deploy --prod`, `vercel env add`, and `vercel sandbox`. Confirm unfamiliar flags with `--help`. Provisioning services, uploading to a Drive, or deploying the agent is separate from checking code and documentation.
 
@@ -84,7 +84,15 @@ Verify behavior against code and current CLI help. When reviewing a passage, rea
 
 ## Validation
 
-Choose checks that establish the changed behavior. Tests live beside their implementations under `agent/` and `scripts/lib/`, and mock only the Vercel Sandbox and Slack APIs using the fixtures in `agent/lib/testing/`.
+Choose checks that establish the changed behavior. Tests live beside their implementations under `agent/` and `scripts/`, and replace only the Vercel Sandbox and Slack APIs using the fixtures in `agent/lib/testing/`.
+
+The suite is deterministic because `agent/lib/testing/setup.ts` clears the template's environment variables and makes every network connection fail, so a test that reaches a live service fails instead of passing by accident. Keep it that way with these fixtures:
+
+- `fakeDriveService` in `drive-service.ts` is an in-memory Drive with a real shell interpreter and the single read-write mount. Use it to assert what ends up on the Drive, and the spies in `sandbox.ts` to assert the exact SDK calls.
+- `copyApp` and `eveInfo` in `cli.ts` compile a temporary copy of the app with eve's CLI, offline. `agent/agent.test.ts` uses them to check the tools, channels, and model eve registers.
+- `runNode` in `cli.ts` runs a script in a process that can't reach the network, which is how `scripts/upload-to-drive.test.ts` tests the upload command's arguments and exit codes.
+
+`agent/types.test.ts` holds type-level assertions about the template's exports and their fit with eve's types. Vitest doesn't check types, so `pnpm typecheck` is what enforces them.
 
 | Command | Purpose |
 | --- | --- |

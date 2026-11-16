@@ -1,3 +1,5 @@
+import nodePath from "node:path";
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -8,12 +10,59 @@ import {
   sandboxDriveWorkspace,
   withWritableDrive,
 } from "./drive";
+import { fakeDriveService } from "./testing/drive-service";
 import {
   commandFinished,
   driveFixture,
   sandboxFixture,
   spyOnSandboxFactories,
 } from "./testing/sandbox";
+
+/**
+ * Builds a deterministic pseudo-random generator, so generated cases are the same on every run.
+ *
+ * @param seed - Starting state.
+ * @returns A function returning the next integer below its bound.
+ */
+const seededRandom = (seed: number) => {
+  let state = seed;
+  return (bound: number) => {
+    state = (Math.imul(state, 1_103_515_245) + 12_345) % 2_147_483_648;
+    return Math.abs(state) % bound;
+  };
+};
+
+/**
+ * Writes one text file in its own write session.
+ *
+ * @param name - Drive-relative path.
+ * @param content - Text to write; defaults to the path.
+ * @returns The Drive-relative path.
+ */
+const writeFile = async (name: string, content = name) =>
+  await withWritableDrive(async (workspace) => {
+    await workspace.writeFiles([{ content, path: resolveDrivePath(name) }]);
+    return name;
+  });
+
+/** Segments a hostile or careless caller might put in a path, valid and invalid. */
+const SEGMENT_POOL = [
+  "notes",
+  "a b",
+  "-rf",
+  "$(id)",
+  "über",
+  "x".repeat(255),
+  "..",
+  ".",
+  "",
+  " pad",
+  "pad ",
+  "a\0b",
+  "x".repeat(256),
+  // 128 characters but 256 UTF-8 bytes.
+  "é".repeat(128),
+];
 
 describe("Drive configuration", () => {
   it.each([
@@ -64,6 +113,59 @@ describe(resolveDrivePath, () => {
     expect(() => resolveDrivePath(path)).toThrow(
       `Invalid Drive path "${path}".`
     );
+  });
+});
+
+describe("resolveDrivePath over generated paths", () => {
+  const next = seededRandom(20_261_116);
+  const paths = Array.from({ length: 300 }, () =>
+    Array.from(
+      { length: 1 + next(4) },
+      () => SEGMENT_POOL[next(SEGMENT_POOL.length)]
+    ).join("/")
+  );
+
+  it("either rejects a path or resolves it to a normalized path inside the mount", () => {
+    const outcomes = paths.map((candidate) => {
+      let resolved: string;
+      try {
+        resolved = resolveDrivePath(candidate);
+      } catch {
+        return "rejected";
+      }
+      expect(resolved).toBe(`/drive/${candidate}`);
+      expect(nodePath.posix.normalize(resolved)).toBe(resolved);
+      expect(nodePath.posix.relative("/drive", resolved)).toBe(candidate);
+      return "resolved";
+    });
+
+    expect(new Set(outcomes)).toStrictEqual(new Set(["rejected", "resolved"]));
+  });
+
+  it("rejects exactly the paths that contain an unsafe segment", () => {
+    const unsafe = new Set(["..", ".", "", " pad", "pad ", "a\0b"]);
+    for (const candidate of paths) {
+      const expected = candidate
+        .split("/")
+        .some(
+          (segment) =>
+            unsafe.has(segment) ||
+            new TextEncoder().encode(segment).length > 255
+        );
+      const rejected = (() => {
+        try {
+          resolveDrivePath(candidate);
+          return false;
+        } catch {
+          return true;
+        }
+      })();
+
+      expect({ candidate, rejected }).toStrictEqual({
+        candidate,
+        rejected: expected,
+      });
+    }
   });
 });
 
@@ -258,5 +360,154 @@ describe(withWritableDrive, () => {
     expect(warn).toHaveBeenCalledExactlyOnceWith("drive.stop_failed", {
       message: "stop failed",
     });
+  });
+});
+
+describe("writes to an in-memory Drive", () => {
+  let drive: ReturnType<typeof fakeDriveService>;
+
+  beforeEach(() => {
+    drive = fakeDriveService();
+  });
+
+  it("keeps text and bytes from separate write sessions", async () => {
+    const bytes = Uint8Array.from([0x00, 0xff, 0x0a, 0x80]);
+
+    await withWritableDrive(async (workspace) => {
+      await workspace.writeFiles([
+        { content: "héllo\n", path: resolveDrivePath("notes/2026/standup.md") },
+      ]);
+    });
+    await withWritableDrive(async (workspace) => {
+      await workspace.writeFiles([
+        { content: bytes, path: resolveDrivePath("images/logo.bin") },
+      ]);
+    });
+
+    await expect(drive.paths()).resolves.toStrictEqual([
+      "/drive/images/logo.bin",
+      "/drive/notes/2026/standup.md",
+    ]);
+    await expect(drive.read("/drive/images/logo.bin")).resolves.toStrictEqual(
+      bytes
+    );
+    await expect(
+      drive.read("/drive/notes/2026/standup.md")
+    ).resolves.toStrictEqual(new TextEncoder().encode("héllo\n"));
+    expect(drive.create).toHaveBeenCalledTimes(2);
+    expect(drive.holder()).toBeUndefined();
+  });
+
+  it("replaces the content of an existing file", async () => {
+    await writeFile("notes/a.md", "first version, the longer one");
+    await writeFile("notes/a.md", "second");
+
+    await expect(drive.read("/drive/notes/a.md")).resolves.toStrictEqual(
+      new TextEncoder().encode("second")
+    );
+  });
+
+  it("stores shell-special names as literal path segments", async () => {
+    const names = [
+      "-rf/--force.md",
+      "$(touch pwned)/`id`.md",
+      "a;b && c/*.md",
+      'it\'s "quoted"/new\nline.md',
+    ];
+
+    await withWritableDrive(async (workspace) => {
+      await workspace.writeFiles(
+        names.map((name) => ({
+          content: name,
+          path: resolveDrivePath(name),
+        }))
+      );
+    });
+
+    await expect(drive.paths()).resolves.toStrictEqual(
+      names.map((name) => `/drive/${name}`).toSorted()
+    );
+  });
+
+  it("removes only the named files and ignores missing ones", async () => {
+    await withWritableDrive(async (workspace) => {
+      await workspace.writeFiles(
+        ["notes/keep.md", "notes/drop.md", "-drop.md"].map((name) => ({
+          content: name,
+          path: resolveDrivePath(name),
+        }))
+      );
+    });
+
+    await withWritableDrive(async (workspace) => {
+      await workspace.remove(
+        ["notes/drop.md", "-drop.md", "notes/never-existed.md"].map(
+          resolveDrivePath
+        )
+      );
+    });
+
+    await expect(drive.paths()).resolves.toStrictEqual([
+      "/drive/notes/keep.md",
+    ]);
+  });
+
+  it("reports the shell's error when asked to remove a folder", async () => {
+    await withWritableDrive(async (workspace) => {
+      await workspace.writeFiles([
+        { content: "a", path: resolveDrivePath("notes/a.md") },
+      ]);
+    });
+
+    await expect(
+      withWritableDrive(async (workspace) => {
+        await workspace.remove([resolveDrivePath("notes")]);
+      })
+    ).rejects.toThrow(
+      "rm failed in the Drive sandbox (exit 1): rm: cannot remove '/drive/notes': Is a directory"
+    );
+    await expect(drive.paths()).resolves.toStrictEqual(["/drive/notes/a.md"]);
+    expect(drive.holder()).toBeUndefined();
+  });
+
+  it("lets one of two concurrent writers through and reports the other as busy", async () => {
+    const results = await Promise.allSettled([
+      writeFile("a.md"),
+      writeFile("b.md"),
+    ]);
+
+    expect(results).toStrictEqual([
+      { status: "fulfilled", value: "a.md" },
+      { reason: new DriveBusyError("sess_1"), status: "rejected" },
+    ]);
+    await expect(drive.paths()).resolves.toStrictEqual(["/drive/a.md"]);
+    expect(drive.holder()).toBeUndefined();
+  });
+
+  it("stays busy while another sandbox holds the mount and writes again once it's released", async () => {
+    drive.hold("sess_upload");
+
+    await expect(writeFile("a.md")).rejects.toStrictEqual(
+      new DriveBusyError("sess_upload")
+    );
+    await expect(drive.paths()).resolves.toStrictEqual([]);
+
+    drive.release();
+
+    await expect(writeFile("a.md")).resolves.toBe("a.md");
+    await expect(drive.paths()).resolves.toStrictEqual(["/drive/a.md"]);
+  });
+
+  it("releases the mount after a failed write so the next write succeeds", async () => {
+    await expect(
+      withWritableDrive(
+        vi
+          .fn<() => Promise<void>>()
+          .mockRejectedValue(new Error("write failed"))
+      )
+    ).rejects.toThrow("write failed");
+
+    await expect(writeFile("a.md")).resolves.toBe("a.md");
+    expect(drive.holder()).toBeUndefined();
   });
 });

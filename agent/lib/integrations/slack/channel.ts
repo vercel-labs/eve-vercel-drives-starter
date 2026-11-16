@@ -93,18 +93,29 @@ export const withIdentityContext = (
 };
 
 /**
- * Creates the Slack channel using credentials from the configured Vercel Connect connector.
+ * Drops an edited Slack message, so an edit never starts a turn.
+ *
+ * @returns null, which tells eve to drop the edit.
+ * @remarks Without an edit handler, eve sends an edit to a mention or DM through the same handlers as a new message. An edit to a request the agent already answered would then start another turn and could save a file again.
+ */
+const ignoreMessageEdit = (): SlackInboundResult => null;
+
+/**
+ * Builds the eve Slack channel config: Vercel Connect credentials, the inbound handlers, and thread history.
  *
  * @param config - Native channel overrides.
- * @returns A channel definition whose inbound turns carry Slack profile context.
+ * @returns The config {@link createSlackChannel} passes to eve's `slackChannel`.
  * @throws {@link Error} When SLACK_CONNECTOR is missing.
- * @remarks Export this definition from agent/channels/slack.ts to retain the slack runtime name. Thread history defaults to messages since the agent's last reply.
+ * @remarks Thread history defaults to messages since the agent's last reply. Edited messages default to {@link ignoreMessageEdit}; a caller's `onMessageEdited` replaces it and runs without the identity context.
  */
-export const createSlackChannel = (config: CreateSlackChannelConfig = {}) => {
+export const slackChannelConfig = (
+  config: CreateSlackChannelConfig = {}
+): SlackChannelConfig => {
   const {
     onMessage,
     onAppMention,
     onDirectMessage,
+    onMessageEdited = ignoreMessageEdit,
     threadContext = { since: "last-agent-reply" },
     ...channelConfig
   } = config;
@@ -115,7 +126,7 @@ export const createSlackChannel = (config: CreateSlackChannelConfig = {}) => {
     onMessage,
   });
 
-  return slackChannel({
+  return {
     ...channelConfig,
     credentials: connectSlackCredentials(
       requireEnv("SLACK_CONNECTOR", "slack/your-agent")
@@ -126,6 +137,18 @@ export const createSlackChannel = (config: CreateSlackChannelConfig = {}) => {
       resolveIdentities
     ),
     onMessage: withIdentityContext(handlers.onMessage, resolveIdentities),
+    onMessageEdited,
     threadContext,
-  });
+  };
 };
+
+/**
+ * Creates the Slack channel using credentials from the configured Vercel Connect connector.
+ *
+ * @param config - Native channel overrides.
+ * @returns A channel definition whose inbound turns carry Slack profile context.
+ * @throws {@link Error} When SLACK_CONNECTOR is missing.
+ * @remarks Export this definition from agent/channels/slack.ts to retain the slack runtime name.
+ */
+export const createSlackChannel = (config: CreateSlackChannelConfig = {}) =>
+  slackChannel(slackChannelConfig(config));
