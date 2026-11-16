@@ -14,11 +14,12 @@ const unsupported = (name: string) => (): never => {
  * Builds the context eve passes to a tool's `execute`.
  *
  * @param toolName - Runtime name of the tool under test.
- * @returns A root-session context whose sandbox and auth accessors fail when unexpectedly called.
+ * @returns A root-session context on the eve channel whose sandbox, auth, and cross-channel accessors fail when unexpectedly called.
  */
 export const toolContext = (toolName: string): ToolContext => ({
   abortSignal: new AbortController().signal,
   callId: "call_1",
+  channel: { kind: "channel:eve", metadata: {} },
   getSandbox: unsupported("a session sandbox"),
   getToken: unsupported("tool auth tokens"),
   messages: [],
@@ -28,5 +29,6 @@ export const toolContext = (toolName: string): ToolContext => ({
     id: "session_1",
     turn: { id: "turn_1", sequence: 1 },
   },
+  to: unsupported("cross-channel sends"),
   toolName,
 });

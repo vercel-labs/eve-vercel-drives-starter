@@ -12,6 +12,7 @@ Choose the task you want to complete:
 - [Sync files on a schedule](#sync-files-on-a-schedule)
 - [Mount a second Drive](#mount-a-second-drive)
 - [Control Slack identity lookups](#control-slack-identity-lookups)
+- [Respond to edited Slack messages](#respond-to-edited-slack-messages)
 - [Remove Slack](#remove-slack)
 - [Test and deploy your changes](#test-and-deploy-your-changes)
 - [Set up an existing project](#set-up-an-existing-project)
@@ -61,9 +62,9 @@ Keep the existing sections on reading and saving files alongside your own guidan
 
 ### Model and token limits
 
-Change `model` in [agent/agent.ts](agent/agent.ts) to use another [AI Gateway model](https://vercel.com/ai-gateway/models). The template uses `openai/gpt-6.1-sol-fast` and authenticates with Vercel OIDC. For other hosting environments, see [AI Gateway authentication](https://vercel.com/docs/ai-gateway/authentication-and-byok).
+Change `model` in [agent/agent.ts](agent/agent.ts) to use another [AI Gateway model](https://vercel.com/ai-gateway/models). The template uses `anthropic/claude-fable-5.2` and authenticates with Vercel OIDC. For other hosting environments, see [AI Gateway authentication](https://vercel.com/docs/ai-gateway/authentication-and-byok). [agent/agent.test.ts](agent/agent.test.ts) checks the configured model, so update its expected ID when you change it.
 
-The same file limits each session to `300_000` input tokens through `maxInputTokensPerSession`. Each model call counts the input it sends, including earlier messages and the file contents the agent has read, so reading many large files reaches the limit sooner. When a session crosses the limit, eve pauses it and asks whether to continue. Increase the limit if sessions pause too often. See [eve's agent configuration](https://eve.dev/docs/agent-config) for output and cost limits.
+The same file limits each session to `300_000` input tokens through `limits.sessionUsage`, a function that receives the session's token usage and returns `true` when the session should stop starting model calls. Each model call counts the input it sends, including earlier messages and the file contents the agent has read, so reading many large files reaches the limit sooner. When a session crosses the limit, eve pauses it and asks whether to continue, and continuing starts a new count. Increase `SESSION_INPUT_TOKEN_LIMIT` if sessions pause too often. See [eve's runtime limits](https://eve.dev/docs/agent-config#runtime-limits) to limit output tokens or cost in the same function.
 
 ## Add your own files
 
@@ -88,7 +89,7 @@ With this prefix, `~/team-docs/runbooks/deploy.md` becomes `/drive/docs/runbooks
 
 The upload holds the Drive's read-write mount for its duration. If the agent is saving a file at the same time, the script exits with a message that the Drive is in use; run it again when the save finishes. A session reads the snapshot mounted when it first used its sandbox, so start a new session, such as a new Slack thread, to see the uploaded files.
 
-Drives are in public beta and are billed for storage, reads, and writes. A new Drive's maximum size defaults to 1 TiB, or 1 GiB on Hobby. See [Sandbox pricing](https://vercel.com/docs/sandbox/pricing#drive-storage) for rates and Hobby allotments, and the [Drives documentation](https://vercel.com/docs/sandbox/concepts/drives) for limits.
+Drives are billed for storage, reads, and writes. A new Drive's maximum size defaults to 1 TiB, or 1 GiB on Hobby. See [Sandbox pricing](https://vercel.com/docs/sandbox/pricing#drive-storage) for rates and Hobby allotments, and the [Drives documentation](https://vercel.com/docs/sandbox/concepts/drives) for limits.
 
 ## Require approval before saving
 
@@ -103,7 +104,7 @@ export default defineTool({
 });
 ```
 
-`once()` asks for approval the first time the tool runs in a session and allows later calls in that session automatically. Use `always()` to require approval for every save. eve's channels, including Slack, render the approval prompt for you. In Slack, anyone in the thread can answer the prompt, including the person who asked, so approval confirms intent rather than restricting who can save. To limit who can approve, add an `onInputResponse` check to the Slack channel, as described in [eve's Slack guide](https://eve.dev/docs/channels/slack). See [eve's human-in-the-loop guide](https://eve.dev/docs/human-in-the-loop) for the other policies, including `auto()`, which asks a decision model whether a call needs a person.
+`once()` asks for approval the first time the tool runs in a session and allows later calls in that session automatically. Use `always()` to require approval for every save. eve's channels, including Slack, render the approval prompt for you. By default, only the person whose message led to the save can approve or cancel it, so approval confirms intent rather than adding a second reviewer. To let designated approvers answer instead, add a `response` policy to the tool's `approval`, as described in [eve's human-in-the-loop guide](https://eve.dev/docs/human-in-the-loop). The same guide covers the other policies, including `auto()`, which asks a decision model whether a call needs a person. To also control who can use the approval buttons in Slack, add an `onAnswers` check to the Slack channel, as described in [eve's Slack reference](https://eve.dev/docs/channels/slack/reference).
 
 ## Add a delete tool
 
@@ -151,7 +152,7 @@ export default defineTool({
 });
 ```
 
-The filename becomes the tool name the model sees. `resolveDrivePath` rejects absolute paths and `..` segments, so the tool can't reach outside the Drive, and `always()` asks a person before each deletion because it can't be undone. `remove` runs `rm -f`, so deleting a path that doesn't exist still returns `deleted: true`, and an invalid path throws instead of returning a result the model can act on. Mirror the `invalid_path` handling in [save_to_drive.ts](agent/tools/save_to_drive.ts) if your agent needs it. Add a sentence to [agent/instructions.md](agent/instructions.md) saying when the agent should offer to delete a file.
+The filename becomes the tool name the model sees, so add `delete_from_drive` to the tool list in [agent/agent.test.ts](agent/agent.test.ts), which fails when eve registers a tool it doesn't expect. `resolveDrivePath` rejects absolute paths and `..` segments, so the tool can't reach outside the Drive, and `always()` asks a person before each deletion because it can't be undone. `remove` runs `rm -f`, so deleting a path that doesn't exist still returns `deleted: true`, and an invalid path throws instead of returning a result the model can act on. Mirror the `invalid_path` handling in [save_to_drive.ts](agent/tools/save_to_drive.ts) if your agent needs it. Add a sentence to [agent/instructions.md](agent/instructions.md) saying when the agent should offer to delete a file.
 
 Only one sandbox can mount a Drive read-write at a time. `withWritableDrive` throws `DriveBusyError` when another sandbox holds the read-write mount, so return that to the model as a result, as above, and let it tell the person to retry.
 
@@ -213,7 +214,7 @@ export default defineSchedule({
 
 Replace the entries in `SOURCES` with your own Drive paths and URLs. The handler downloads every file before mounting the Drive, so a failed download leaves the Drive unchanged and holds the read-write mount only while writing. If a save or upload holds the read-write mount when the schedule runs, it logs `drive.sync_skipped` and the next run tries again.
 
-On Vercel, each schedule becomes a Vercel Cron Job and the expression is evaluated in UTC. `pnpm dev` doesn't run schedules on their cadence. To run this one once while the dev server is running, send:
+On Vercel, each schedule runs through [Vercel Schedules](https://vercel.com/docs/schedules), which starts a run within a short window after its scheduled time. The expression is evaluated in UTC unless you set `timezone`. `pnpm dev` doesn't run schedules on their cadence. To run this one once while the dev server is running, send:
 
 ```sh
 curl -X POST http://localhost:2000/eve/v1/dev/schedules/sync-handbook
@@ -269,7 +270,9 @@ Both Drives must be in `DRIVE_REGION`, and a Drive's region can't change after i
 
 ## Control Slack identity lookups
 
-Before responding to a Slack mention or direct message, the agent looks up the Slack profiles of the sender, anyone mentioned, and the people who posted in the thread since its last reply, then adds their names and profile images to the conversation as context. This uses the `users:read` permission. The agent never adds email addresses, so it can't reveal them to other people in a channel.
+Before responding to a Slack mention or direct message, the agent looks up the Slack profiles of the sender, anyone mentioned, and the people who posted in the thread since its last reply, then adds their names and profile images to the conversation as context. The agent never adds email addresses, so it can't reveal them to other people in a channel.
+
+The lookups use Slack's `users:read` permission. The Slack app manifest that eve generates at build time lists only the permissions eve's own channel features need, so it doesn't include `users:read` for these lookups. Without the permission the agent still responds and refers to people by their Slack IDs, and the logs show `Slack profile lookup failed: missing_scope`. If you see that message, add `users:read` under Bot Scopes in the connector's Advanced settings on Vercel and reinstall the Slack app.
 
 To skip profile lookups for selected bot or service accounts, set:
 
@@ -278,6 +281,26 @@ SLACK_IDENTITY_EXCLUDED_USER_IDS=U0123456789,U0987654321
 ```
 
 Excluded users can still interact with the agent; this setting only skips their profile lookups. The lookup code and its tests are in [identity.ts](agent/lib/integrations/slack/identity.ts) and [identity.test.ts](agent/lib/integrations/slack/identity.test.ts).
+
+## Respond to edited Slack messages
+
+eve can send the agent a person's edit to a message in a thread the agent has answered. The template ignores edits, because an edit to a request the agent already handled would start a new turn and could save the file again. To accept edits, pass `onMessageEdited` in [agent/channels/slack.ts](agent/channels/slack.ts):
+
+```ts
+import {
+  createSlackChannel,
+  handleExplicitInvocation,
+} from "../lib/integrations/slack/channel";
+
+/**
+ * Connects the agent to Slack and lets an edit to a message in one of its threads start a turn.
+ */
+export default createSlackChannel({
+  onMessageEdited: (ctx, edit) => handleExplicitInvocation(ctx, edit.message),
+});
+```
+
+This sends every edit a person makes in a thread the agent has answered, including edits to replies that don't mention it, and drops edits by bots. An edit reaches the agent without the Slack profile context that new messages carry. [eve's Slack reference](https://eve.dev/docs/channels/slack/reference#message-edits) shows what the agent sees for an edit and recommends adding the `no_reply` tool so the agent can stay quiet when an edit changes nothing. If you add a tool, add its name to the tool list in [agent/agent.test.ts](agent/agent.test.ts).
 
 ## Remove Slack
 
@@ -292,6 +315,7 @@ pnpm remove @vercel/connect
 `env.ts` and `values.ts` are used only by the Slack integration. Then update the remaining Slack references:
 
 - In [agent/instructions.md](agent/instructions.md), the identity and the examples that mention Slack threads.
+- In [agent/agent.test.ts](agent/agent.test.ts), the `SLACK_CONNECTOR` values and the tests that expect the Slack channel and its route.
 - In [README.md](README.md), the `connect` parameter in the Deploy button URL, the Slack row in the tech stack table, and the Slack row in the customization table.
 - In your Vercel project, the `SLACK_CONNECTOR` and `SLACK_IDENTITY_EXCLUDED_USER_IDS` variables.
 
@@ -312,7 +336,7 @@ Save any environment variable changes with the [CLI commands above](#change-envi
 vercel deploy --prod
 ```
 
-The automated tests replace the Vercel Sandbox and Drive APIs with fakes, so they confirm path handling and the busy check but not access to your Drive. After deploying, start a new Slack thread and ask what's on the Drive. Ask the agent to save a short note, then start another thread and confirm the note appears. Slack events reach only your production deployment unless you set up a separate preview connector as described in [eve's guide to testing a preview branch](https://eve.dev/docs/channels/slack#test-a-preview-branch).
+The automated tests run without network access. They replace the Vercel Sandbox and Drive APIs with an in-memory Drive, so they confirm what gets written, path handling, and the busy check, but not access to your Drive. After deploying, start a new Slack thread and ask what's on the Drive. Ask the agent to save a short note, then start another thread and confirm the note appears. Slack events reach only your production deployment unless you set up a separate preview connector as described in [eve's guide to testing a preview branch](https://eve.dev/docs/channels/slack/reference#test-a-preview-branch).
 
 ## Set up an existing project
 
@@ -334,7 +358,7 @@ vercel connect create slack --name drive-agent \
 vercel connect attach slack/drive-agent
 ```
 
-Follow the browser prompts to connect the agent to your Slack workspace. If you choose another name, use it in the attach command and `SLACK_CONNECTOR` below. Events go to the production deployment at `/eve/v1/slack`. See [eve's Slack guide](https://eve.dev/docs/channels/slack) for event subscriptions and troubleshooting.
+Follow the browser prompts to connect the agent to your Slack workspace. If you choose another name, use it in the attach command and `SLACK_CONNECTOR` below. Events go to the production deployment at `/eve/v1/slack`. See [eve's Slack guide](https://eve.dev/docs/channels/slack) for event subscriptions and [its reference](https://eve.dev/docs/channels/slack/reference#troubleshoot-slack-delivery) for troubleshooting.
 
 ### Configure and deploy
 
